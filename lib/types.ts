@@ -12,7 +12,7 @@ export interface ScrapedSource {
   domain: string;
   snippet: string;
   source: "wikipedia" | "web";
-  supports: "yes" | "no" | "neutral"; // filled after LLM analysis
+  supports: "yes" | "no" | "neutral";
 }
 
 export interface ClaimResult {
@@ -20,23 +20,24 @@ export interface ClaimResult {
   claim: string;
   span: string;
   type: string;
-  // AI verdict
-  verdict: Verdict;
-  confidence: number; // source-based: % of sources supporting
+  // Evidence score only — AI does NOT decide verdict
+  sourceScore: number;       // % of sources that support (0-100)
   supportingCount: number;
   contradictingCount: number;
   totalSources: number;
-  reasoning: string;
+  reasoning: string;         // summary of what evidence shows
   supporting_quote: string;
   sources: ScrapedSource[];
-  // User override
-  userVerdict: Verdict | null; // null = user hasn't overridden
+  // Only the user decides
+  userVerdict: Verdict | null; // null = pending, user hasn't decided yet
 }
 
 export interface AuditResult {
   claims: ClaimResult[];
-  trustScore: number;
+  trustScore: number;        // calculated from user verdicts only
   totalClaims: number;
+  decidedCount: number;      // how many user has labelled
+  pendingCount: number;      // how many still pending
   verifiedCount: number;
   unverifiedCount: number;
   hallucinatedCount: number;

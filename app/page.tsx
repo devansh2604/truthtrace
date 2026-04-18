@@ -25,17 +25,18 @@ const VerdictBar = dynamic(
 interface Progress { phase: string; current: number; total: number; }
 
 function computeAuditStats(claims: ClaimResult[]) {
-  const effective = claims.map((c) => ({ ...c, verdict: (c.userVerdict ?? c.verdict) as Verdict }));
-  const verifiedCount = effective.filter((r) => r.verdict === "verified").length;
-  const hallucinatedCount = effective.filter((r) => r.verdict === "hallucinated").length;
-  const unverifiedCount = effective.filter((r) => r.verdict === "unverified").length;
-  const verifiedAvgConf = verifiedCount > 0
-    ? effective.filter((r) => r.verdict === "verified").reduce((s, r) => s + r.confidence, 0) / verifiedCount
+  const decided = claims.filter((c) => c.userVerdict !== null);
+  const verifiedCount = decided.filter((r) => r.userVerdict === "verified").length;
+  const hallucinatedCount = decided.filter((r) => r.userVerdict === "hallucinated").length;
+  const unverifiedCount = decided.filter((r) => r.userVerdict === "unverified").length;
+  const pendingCount = claims.filter((r) => r.userVerdict === null).length;
+  const verifiedAvgScore = verifiedCount > 0
+    ? decided.filter((r) => r.userVerdict === "verified").reduce((s, r) => s + r.sourceScore, 0) / verifiedCount
     : 0;
-  const trustScore = Math.min(100, Math.max(0, Math.round(
-    claims.length > 0 ? (verifiedCount / claims.length) * verifiedAvgConf : 0
-  )));
-  return { verifiedCount, hallucinatedCount, unverifiedCount, trustScore };
+  const trustScore = decided.length > 0
+    ? Math.min(100, Math.max(0, Math.round((verifiedCount / claims.length) * verifiedAvgScore)))
+    : 0;
+  return { verifiedCount, hallucinatedCount, unverifiedCount, pendingCount, trustScore, decidedCount: decided.length };
 }
 
 export default function Home() {
@@ -116,7 +117,7 @@ export default function Home() {
     }
   };
 
-  const handleVerdictOverride = useCallback((claimId: string, verdict: Verdict) => {
+  const handleVerdictOverride = useCallback((claimId: string, verdict: Verdict | null) => {
     setAuditResult((prev) => {
       if (!prev) return prev;
       const updatedClaims = prev.claims.map((c) =>
@@ -130,6 +131,8 @@ export default function Home() {
         verifiedCount: stats.verifiedCount,
         unverifiedCount: stats.unverifiedCount,
         hallucinatedCount: stats.hallucinatedCount,
+        pendingCount: stats.pendingCount,
+        decidedCount: stats.decidedCount,
       };
     });
   }, []);

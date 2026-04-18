@@ -1,5 +1,5 @@
 import Groq from "groq-sdk";
-import { RawClaim, Verdict, ScrapedSource } from "./types";
+import { RawClaim, ScrapedSource } from "./types";
 
 export function createGroqClient(apiKey: string): Groq {
   return new Groq({ apiKey, dangerouslyAllowBrowser: false });
@@ -41,22 +41,20 @@ Rules:
     return Array.isArray(parsed) ? parsed : [];
   } catch {
     const match = cleaned.match(/\[[\s\S]*\]/);
-    if (match) {
-      try { return JSON.parse(match[0]); } catch { return []; }
-    }
+    if (match) { try { return JSON.parse(match[0]); } catch { return []; } }
     return [];
   }
 }
 
-export async function verifyClaim(
+// AI only analyses evidence and returns a score — NO verdict label
+export async function analyseEvidence(
   client: Groq,
   model: string,
   claim: string,
   evidenceText: string,
   totalSources: number
 ): Promise<{
-  verdict: Verdict;
-  confidence: number;
+  sourceScore: number;
   supportingCount: number;
   contradictingCount: number;
   reasoning: string;
@@ -68,28 +66,24 @@ export async function verifyClaim(
     messages: [
       {
         role: "system",
-        content: `You are a rigorous fact-checker with access to ${totalSources} web sources.
+        content: `You are a neutral evidence analyst. You do NOT decide if a claim is true or false — that is for the human to decide. Your job is only to:
+1. Count how many of the ${totalSources} sources support the claim vs contradict it
+2. Summarise what the evidence shows
+3. Pick the best supporting quote
 
-Analyze the claim against ALL provided sources. Return ONLY raw JSON (no markdown):
+Return ONLY raw JSON (no markdown):
 {
-  "verdict": "verified" | "unverified" | "hallucinated",
-  "supporting_count": <integer - how many sources support the claim>,
-  "contradicting_count": <integer - how many sources contradict or cast doubt>,
-  "reasoning": "<2-3 sentence summary of what the evidence shows>",
-  "supporting_quote": "<best quote from any source supporting or clarifying the claim>",
+  "supporting_count": <integer>,
+  "contradicting_count": <integer>,
+  "reasoning": "<2-3 sentence neutral summary of what the evidence shows — do NOT say verified/hallucinated/true/false>",
+  "supporting_quote": "<best quote from any source, or empty string>",
   "source_sentiments": [
     {"index": 1, "supports": "yes" | "no" | "neutral"},
     ...one entry per source...
   ]
 }
 
-Verdict rules:
-- "verified": Majority of sources (>50%) confirm the claim clearly.
-- "hallucinated": Claim directly contradicts evidence, OR contains invented names/papers/institutions not found in any source.
-- "unverified": Sources are inconclusive, mixed, or absent.
-
-supporting_count + contradicting_count should add up to the number of sources that took a clear position.
-Be precise with the counts. Do NOT inflate supporting_count.`,
+Be precise. Do NOT pass any judgment. Just report what the sources say.`,
       },
       {
         role: "user",
@@ -108,27 +102,22 @@ Be precise with the counts. Do NOT inflate supporting_count.`,
     const supporting = Math.max(0, parseInt(p.supporting_count) || 0);
     const contradicting = Math.max(0, parseInt(p.contradicting_count) || 0);
     const total = Math.max(supporting + contradicting, 1);
-    // Confidence = % of opinionated sources that support
-    const confidence = Math.round((supporting / total) * 100);
+    const sourceScore = Math.round((supporting / total) * 100);
 
     return {
-      verdict: ["verified", "unverified", "hallucinated"].includes(p.verdict)
-        ? (p.verdict as Verdict)
-        : "unverified",
-      confidence,
+      sourceScore,
       supportingCount: supporting,
       contradictingCount: contradicting,
-      reasoning: p.reasoning || "Unable to determine.",
+      reasoning: p.reasoning || "No summary available.",
       supporting_quote: p.supporting_quote || "",
       sourceSentiments: Array.isArray(p.source_sentiments) ? p.source_sentiments : [],
     };
   } catch {
     return {
-      verdict: "unverified",
-      confidence: 50,
+      sourceScore: 50,
       supportingCount: 0,
       contradictingCount: 0,
-      reasoning: "Could not parse verification response.",
+      reasoning: "Could not analyse evidence.",
       supporting_quote: "",
       sourceSentiments: [],
     };

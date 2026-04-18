@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createGroqClient, extractClaims, verifyClaim } from "@/lib/groq";
+import { createGroqClient, extractClaims, analyseEvidence } from "@/lib/groq";
 import { gatherEvidence } from "@/lib/evidence";
 import { AuditResult, ClaimResult, StreamEvent } from "@/lib/types";
 
@@ -11,6 +11,39 @@ function sendEvent(controller: ReadableStreamDefaultController, event: StreamEve
   controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
 }
 
+function computeStats(results: ClaimResult[]): AuditResult {
+  const decided = results.filter((r) => r.userVerdict !== null);
+  const verifiedCount = decided.filter((r) => r.userVerdict === "verified").length;
+  const unverifiedCount = decided.filter((r) => r.userVerdict === "unverified").length;
+  const hallucinatedCount = decided.filter((r) => r.userVerdict === "hallucinated").length;
+  const pendingCount = results.filter((r) => r.userVerdict === null).length;
+
+  // Trust score only from user verdicts
+  // If no one has decided yet → 0
+  const verifiedAvgScore =
+    verifiedCount > 0
+      ? decided
+          .filter((r) => r.userVerdict === "verified")
+          .reduce((s, r) => s + r.sourceScore, 0) / verifiedCount
+      : 0;
+
+  const trustScore =
+    decided.length > 0
+      ? Math.min(100, Math.max(0, Math.round((verifiedCount / results.length) * verifiedAvgScore)))
+      : 0;
+
+  return {
+    claims: results,
+    trustScore,
+    totalClaims: results.length,
+    decidedCount: decided.length,
+    pendingCount,
+    verifiedCount,
+    unverifiedCount,
+    hallucinatedCount,
+  };
+}
+
 export async function POST(req: NextRequest) {
   let body: { text: string; apiKey: string; model: string };
   try {
@@ -20,12 +53,10 @@ export async function POST(req: NextRequest) {
   }
 
   const { text, apiKey, model } = body;
-  if (!text || !apiKey || !model) {
+  if (!text || !apiKey || !model)
     return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
-  }
-  if (!apiKey.startsWith("gsk")) {
+  if (!apiKey.startsWith("gsk"))
     return NextResponse.json({ error: "Invalid Groq API key format" }, { status: 400 });
-  }
 
   const stream = new ReadableStream({
     async start(controller) {
@@ -42,7 +73,7 @@ export async function POST(req: NextRequest) {
         }
 
         const results: ClaimResult[] = [];
-        const BATCH_SIZE = 2; // smaller batch — scraping is heavier
+        const BATCH_SIZE = 2;
 
         for (let i = 0; i < rawClaims.length; i += BATCH_SIZE) {
           const batch = rawClaims.slice(i, i + BATCH_SIZE);
@@ -57,21 +88,12 @@ export async function POST(req: NextRequest) {
           const batchResults = await Promise.all(
             batch.map(async (rawClaim, batchIdx) => {
               const claimIdx = i + batchIdx;
-
-              // Gather evidence via scraping
               const { sources, evidenceText, totalSources } = await gatherEvidence(rawClaim.claim);
+              const analysis = await analyseEvidence(groq, model, rawClaim.claim, evidenceText, totalSources);
 
-              // Verify with source counts
-              const verification = await verifyClaim(
-                groq, model, rawClaim.claim, evidenceText, totalSources
-              );
-
-              // Attach supports sentiment to each source
               const enrichedSources = sources.map((src, si) => {
-                const sentiment = verification.sourceSentiments.find(
-                  (s) => s.index === si + 1
-                );
-                return { ...src, supports: sentiment?.supports || "neutral" as const };
+                const sentiment = analysis.sourceSentiments.find((s) => s.index === si + 1);
+                return { ...src, supports: sentiment?.supports || ("neutral" as const) };
               });
 
               const result: ClaimResult = {
@@ -79,15 +101,14 @@ export async function POST(req: NextRequest) {
                 claim: rawClaim.claim,
                 span: rawClaim.span || rawClaim.claim,
                 type: rawClaim.type || "other",
-                verdict: verification.verdict,
-                confidence: verification.confidence,
-                supportingCount: verification.supportingCount,
-                contradictingCount: verification.contradictingCount,
+                sourceScore: analysis.sourceScore,
+                supportingCount: analysis.supportingCount,
+                contradictingCount: analysis.contradictingCount,
                 totalSources,
-                reasoning: verification.reasoning,
-                supporting_quote: verification.supporting_quote,
+                reasoning: analysis.reasoning,
+                supporting_quote: analysis.supporting_quote,
                 sources: enrichedSources,
-                userVerdict: null,
+                userVerdict: null, // user decides — starts as pending
               };
 
               return result;
@@ -100,30 +121,7 @@ export async function POST(req: NextRequest) {
           }
         }
 
-        // Compute audit using AI verdicts (user overrides happen client-side)
-        const verifiedCount = results.filter((r) => r.verdict === "verified").length;
-        const hallucinatedCount = results.filter((r) => r.verdict === "hallucinated").length;
-        const unverifiedCount = results.filter((r) => r.verdict === "unverified").length;
-
-        const verifiedAvgConf =
-          verifiedCount > 0
-            ? results.filter((r) => r.verdict === "verified").reduce((s, r) => s + r.confidence, 0) / verifiedCount
-            : 0;
-
-        const trustScore = Math.min(100, Math.max(0, Math.round(
-          results.length > 0 ? (verifiedCount / results.length) * verifiedAvgConf : 0
-        )));
-
-        const audit: AuditResult = {
-          claims: results,
-          trustScore,
-          totalClaims: results.length,
-          verifiedCount,
-          unverifiedCount,
-          hallucinatedCount,
-        };
-
-        sendEvent(controller, { type: "complete", audit });
+        sendEvent(controller, { type: "complete", audit: computeStats(results) });
         controller.close();
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : "An unexpected error occurred.";
