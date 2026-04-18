@@ -1,19 +1,27 @@
 "use client";
-
+import dynamic from "next/dynamic";
 import { useState, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Download, FileJson, AlertTriangle } from "lucide-react";
 import { Hero } from "@/components/hero";
 import { ConfigCard } from "@/components/config-card";
 import { AuditButton } from "@/components/audit-button";
-import { TrustScoreRing } from "@/components/results/trust-score-ring";
 import { MetricCards } from "@/components/results/metric-cards";
-import { VerdictBar } from "@/components/results/verdict-bar";
 import { AnnotatedDoc } from "@/components/results/annotated-doc";
 import { ClaimCards } from "@/components/results/claim-cards";
 import { SAMPLE_TEXT, GROQ_MODELS } from "@/lib/constants";
 import { generateMarkdownReport, generateJSONPayload, downloadFile } from "@/lib/export";
 import type { AuditResult, ClaimResult, StreamEvent } from "@/lib/types";
+
+// Recharts components must be loaded client-side only (no SSR)
+const TrustScoreRing = dynamic(
+  () => import("@/components/results/trust-score-ring").then((m) => m.TrustScoreRing),
+  { ssr: false }
+);
+const VerdictBar = dynamic(
+  () => import("@/components/results/verdict-bar").then((m) => m.VerdictBar),
+  { ssr: false }
+);
 
 interface Progress {
   phase: string;
@@ -80,33 +88,31 @@ export default function Home() {
 
             if (event.type === "claim_start") {
               setProgress({
-                phase: event.total > 0
-                  ? `Verifying claim ${event.claimIndex + 1}/${event.total}`
-                  : "Extracting claims…",
+                phase:
+                  event.total > 0
+                    ? `Verifying claim ${event.claimIndex + 1}/${event.total}`
+                    : "Extracting claims…",
                 current: event.claimIndex,
                 total: event.total,
               });
             } else if (event.type === "claim_result") {
               setStreamingClaims((prev) => [...prev, event.result]);
-              setProgress((p) =>
-                p
-                  ? { ...p, phase: `Verifying claim ${event.result.id}…` }
-                  : null
-              );
             } else if (event.type === "complete") {
               setAuditResult(event.audit);
               setStreamingClaims([]);
             } else if (event.type === "error") {
               throw new Error(event.message);
             }
-          } catch (parseErr) {
+          } catch {
             // ignore malformed SSE lines
           }
         }
       }
     } catch (err: unknown) {
       if (err instanceof Error && err.name === "AbortError") return;
-      setError(err instanceof Error ? err.message : "An unexpected error occurred.");
+      setError(
+        err instanceof Error ? err.message : "An unexpected error occurred."
+      );
     } finally {
       setLoading(false);
       setProgress(null);
@@ -163,74 +169,85 @@ export default function Home() {
           </motion.div>
         )}
 
-        {/* Streaming + Results */}
+        {/* Streaming live preview cards */}
         <AnimatePresence>
-          {(displayClaims.length > 0 || auditResult) && (
+          {isStreaming && streamingClaims.length > 0 && (
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0 }}
+              style={{ marginTop: 24 }}
+            >
+              <ClaimCards claims={streamingClaims} streaming={true} />
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Full results after complete */}
+        <AnimatePresence>
+          {auditResult && (
             <motion.div
               className="results-section"
+              key="results"
               initial={{ opacity: 0, y: 30 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.6 }}
             >
-              {/* Top row: trust score + verdict bar */}
-              {auditResult && (
-                <>
-                  <div className="results-top-row">
-                    <TrustScoreRing score={auditResult.trustScore} />
-                    <VerdictBar
-                      verified={auditResult.verifiedCount}
-                      unverified={auditResult.unverifiedCount}
-                      hallucinated={auditResult.hallucinatedCount}
-                    />
-                  </div>
+              {/* Trust Score + Verdict Bar */}
+              <div className="results-top-row">
+                <TrustScoreRing score={auditResult.trustScore} />
+                <VerdictBar
+                  verified={auditResult.verifiedCount}
+                  unverified={auditResult.unverifiedCount}
+                  hallucinated={auditResult.hallucinatedCount}
+                />
+              </div>
 
-                  <MetricCards
-                    total={auditResult.totalClaims}
-                    verified={auditResult.verifiedCount}
-                    unverified={auditResult.unverifiedCount}
-                    hallucinated={auditResult.hallucinatedCount}
-                  />
+              {/* Metric Cards */}
+              <MetricCards
+                total={auditResult.totalClaims}
+                verified={auditResult.verifiedCount}
+                unverified={auditResult.unverifiedCount}
+                hallucinated={auditResult.hallucinatedCount}
+              />
 
-                  <AnnotatedDoc text={text} claims={auditResult.claims} />
+              {/* Annotated Document */}
+              <AnnotatedDoc text={text} claims={auditResult.claims} />
 
-                  {/* Export */}
-                  <div className="export-row">
-                    <button
-                      className="export-btn"
-                      onClick={() =>
-                        downloadFile(
-                          generateMarkdownReport(text, auditResult),
-                          `truthtrace-audit-${Date.now()}.md`,
-                          "text/markdown"
-                        )
-                      }
-                    >
-                      <Download size={15} />
-                      Download Markdown
-                    </button>
-                    <button
-                      className="export-btn"
-                      onClick={() =>
-                        downloadFile(
-                          generateJSONPayload(text, auditResult),
-                          `truthtrace-audit-${Date.now()}.json`,
-                          "application/json"
-                        )
-                      }
-                    >
-                      <FileJson size={15} />
-                      Download JSON
-                    </button>
-                  </div>
-                </>
-              )}
+              {/* Export buttons */}
+              <div className="export-row">
+                <button
+                  className="export-btn"
+                  onClick={() =>
+                    downloadFile(
+                      generateMarkdownReport(text, auditResult),
+                      `truthtrace-audit-${Date.now()}.md`,
+                      "text/markdown"
+                    )
+                  }
+                >
+                  <Download size={15} />
+                  Download Markdown
+                </button>
+                <button
+                  className="export-btn"
+                  onClick={() =>
+                    downloadFile(
+                      generateJSONPayload(text, auditResult),
+                      `truthtrace-audit-${Date.now()}.json`,
+                      "application/json"
+                    )
+                  }
+                >
+                  <FileJson size={15} />
+                  Download JSON
+                </button>
+              </div>
 
-              {/* Claim cards (show during streaming too) */}
-              {displayClaims.length > 0 && (
-                <div style={{ marginTop: auditResult ? 24 : 0 }}>
-                  <ClaimCards claims={displayClaims} streaming={isStreaming} />
-                </div>
-              )}
+              {/* Claim cards list */}
+              <div style={{ marginTop: 24 }}>
+                <ClaimCards claims={auditResult.claims} streaming={false} />
+              </div>
             </motion.div>
           )}
         </AnimatePresence>
