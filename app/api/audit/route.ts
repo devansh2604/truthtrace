@@ -72,16 +72,19 @@ export async function POST(req: NextRequest) {
           return;
         }
 
+        // Cap at 8 claims to prevent Vercel 60s timeout
+        const cappedClaims = rawClaims.slice(0, 8);
+
         const results: ClaimResult[] = [];
         const BATCH_SIZE = 2;
 
-        for (let i = 0; i < rawClaims.length; i += BATCH_SIZE) {
-          const batch = rawClaims.slice(i, i + BATCH_SIZE);
+        for (let i = 0; i < cappedClaims.length; i += BATCH_SIZE) {
+          const batch = cappedClaims.slice(i, i + BATCH_SIZE);
 
           sendEvent(controller, {
             type: "claim_start",
             claimIndex: i,
-            total: rawClaims.length,
+            total: cappedClaims.length,
             claim: batch[0]?.claim || "",
           });
 

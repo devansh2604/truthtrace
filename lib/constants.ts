@@ -9,6 +9,6 @@ In 2019, the Eiffel Tower was officially repainted for the 20th time in its hist
 export const GROQ_MODELS = [
   { value: "llama-3.3-70b-versatile", label: "Llama 3.3 70B (Recommended)" },
   { value: "llama-3.1-8b-instant", label: "Llama 3.1 8B (Faster)" },
-  { value: "gemma2-9b-it", label: "Gemma 2 9B" },
   { value: "meta-llama/llama-4-scout-17b-16e-instruct", label: "Llama 4 Scout 17B" },
+  { value: "llama-3.1-70b-versatile", label: "Llama 3.1 70B" },
 ];
