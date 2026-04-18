@@ -6,11 +6,13 @@ export interface RawClaim {
   type: string;
 }
 
-export interface EvidenceSource {
+export interface ScrapedSource {
   title: string;
   url: string;
+  domain: string;
   snippet: string;
-  source: "wikipedia" | "duckduckgo";
+  source: "wikipedia" | "web";
+  supports: "yes" | "no" | "neutral"; // filled after LLM analysis
 }
 
 export interface ClaimResult {
@@ -18,11 +20,17 @@ export interface ClaimResult {
   claim: string;
   span: string;
   type: string;
+  // AI verdict
   verdict: Verdict;
-  confidence: number;
+  confidence: number; // source-based: % of sources supporting
+  supportingCount: number;
+  contradictingCount: number;
+  totalSources: number;
   reasoning: string;
   supporting_quote: string;
-  sources: EvidenceSource[];
+  sources: ScrapedSource[];
+  // User override
+  userVerdict: Verdict | null; // null = user hasn't overridden
 }
 
 export interface AuditResult {

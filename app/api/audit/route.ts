@@ -6,18 +6,13 @@ import { AuditResult, ClaimResult, StreamEvent } from "@/lib/types";
 export const maxDuration = 60;
 export const runtime = "nodejs";
 
-function sendEvent(
-  controller: ReadableStreamDefaultController,
-  event: StreamEvent
-) {
+function sendEvent(controller: ReadableStreamDefaultController, event: StreamEvent) {
   const encoder = new TextEncoder();
-  const data = `data: ${JSON.stringify(event)}\n\n`;
-  controller.enqueue(encoder.encode(data));
+  controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
 }
 
 export async function POST(req: NextRequest) {
   let body: { text: string; apiKey: string; model: string };
-
   try {
     body = await req.json();
   } catch {
@@ -25,19 +20,11 @@ export async function POST(req: NextRequest) {
   }
 
   const { text, apiKey, model } = body;
-
   if (!text || !apiKey || !model) {
-    return NextResponse.json(
-      { error: "Missing required fields: text, apiKey, model" },
-      { status: 400 }
-    );
+    return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
   }
-
-  if (!apiKey.startsWith("gsk_") && !apiKey.startsWith("gsk")) {
-    return NextResponse.json(
-      { error: "Invalid Groq API key format" },
-      { status: 400 }
-    );
+  if (!apiKey.startsWith("gsk")) {
+    return NextResponse.json({ error: "Invalid Groq API key format" }, { status: 400 });
   }
 
   const stream = new ReadableStream({
@@ -45,28 +32,17 @@ export async function POST(req: NextRequest) {
       try {
         const groq = createGroqClient(apiKey);
 
-        // Step 1: Extract claims
-        sendEvent(controller, {
-          type: "claim_start",
-          claimIndex: 0,
-          total: 0,
-          claim: "Extracting claims...",
-        });
+        sendEvent(controller, { type: "claim_start", claimIndex: 0, total: 0, claim: "Extracting claims…" });
 
         const rawClaims = await extractClaims(groq, model, text);
-
         if (rawClaims.length === 0) {
-          sendEvent(controller, {
-            type: "error",
-            message: "No claims could be extracted from the text.",
-          });
+          sendEvent(controller, { type: "error", message: "No claims could be extracted from the text." });
           controller.close();
           return;
         }
 
-        // Step 2 & 3: Evidence + Verification per claim (parallel batches)
         const results: ClaimResult[] = [];
-        const BATCH_SIZE = 3;
+        const BATCH_SIZE = 2; // smaller batch — scraping is heavier
 
         for (let i = 0; i < rawClaims.length; i += BATCH_SIZE) {
           const batch = rawClaims.slice(i, i + BATCH_SIZE);
@@ -78,32 +54,45 @@ export async function POST(req: NextRequest) {
             claim: batch[0]?.claim || "",
           });
 
-          const batchPromises = batch.map(async (rawClaim, batchIdx) => {
-            const claimIdx = i + batchIdx;
-            const { sources, evidenceText } = await gatherEvidence(rawClaim.claim);
-            const verification = await verifyClaim(
-              groq,
-              model,
-              rawClaim.claim,
-              evidenceText
-            );
+          const batchResults = await Promise.all(
+            batch.map(async (rawClaim, batchIdx) => {
+              const claimIdx = i + batchIdx;
 
-            const result: ClaimResult = {
-              id: `claim-${claimIdx}`,
-              claim: rawClaim.claim,
-              span: rawClaim.span || rawClaim.claim,
-              type: rawClaim.type || "other",
-              verdict: verification.verdict,
-              confidence: verification.confidence,
-              reasoning: verification.reasoning,
-              supporting_quote: verification.supporting_quote,
-              sources,
-            };
+              // Gather evidence via scraping
+              const { sources, evidenceText, totalSources } = await gatherEvidence(rawClaim.claim);
 
-            return result;
-          });
+              // Verify with source counts
+              const verification = await verifyClaim(
+                groq, model, rawClaim.claim, evidenceText, totalSources
+              );
 
-          const batchResults = await Promise.all(batchPromises);
+              // Attach supports sentiment to each source
+              const enrichedSources = sources.map((src, si) => {
+                const sentiment = verification.sourceSentiments.find(
+                  (s) => s.index === si + 1
+                );
+                return { ...src, supports: sentiment?.supports || "neutral" as const };
+              });
+
+              const result: ClaimResult = {
+                id: `claim-${claimIdx}`,
+                claim: rawClaim.claim,
+                span: rawClaim.span || rawClaim.claim,
+                type: rawClaim.type || "other",
+                verdict: verification.verdict,
+                confidence: verification.confidence,
+                supportingCount: verification.supportingCount,
+                contradictingCount: verification.contradictingCount,
+                totalSources,
+                reasoning: verification.reasoning,
+                supporting_quote: verification.supporting_quote,
+                sources: enrichedSources,
+                userVerdict: null,
+              };
+
+              return result;
+            })
+          );
 
           for (const result of batchResults) {
             results.push(result);
@@ -111,35 +100,23 @@ export async function POST(req: NextRequest) {
           }
         }
 
-        // Step 4: Compute final audit
+        // Compute audit using AI verdicts (user overrides happen client-side)
         const verifiedCount = results.filter((r) => r.verdict === "verified").length;
-        const hallucinatedCount = results.filter(
-          (r) => r.verdict === "hallucinated"
-        ).length;
-        const unverifiedCount = results.filter(
-          (r) => r.verdict === "unverified"
-        ).length;
+        const hallucinatedCount = results.filter((r) => r.verdict === "hallucinated").length;
+        const unverifiedCount = results.filter((r) => r.verdict === "unverified").length;
 
-        // Trust score: % of claims verified * avg confidence of verified claims
-        // Penalises hallucinations heavily, rewards verified claims
         const verifiedAvgConf =
           verifiedCount > 0
-            ? results
-                .filter((r) => r.verdict === "verified")
-                .reduce((s, r) => s + r.confidence, 0) / verifiedCount
+            ? results.filter((r) => r.verdict === "verified").reduce((s, r) => s + r.confidence, 0) / verifiedCount
             : 0;
 
-        // Score = (verified/total) * verifiedAvgConf
-        // e.g. 4 verified of 12 claims, avg 88% conf → (4/12)*88 = 29
-        // All verified at 90% → 90. All hallucinated → 0.
-        const rawScore =
-          results.length > 0
-            ? (verifiedCount / results.length) * verifiedAvgConf
-            : 0;
+        const trustScore = Math.min(100, Math.max(0, Math.round(
+          results.length > 0 ? (verifiedCount / results.length) * verifiedAvgConf : 0
+        )));
 
         const audit: AuditResult = {
           claims: results,
-          trustScore: Math.min(100, Math.max(0, Math.round(rawScore))),
+          trustScore,
           totalClaims: results.length,
           verifiedCount,
           unverifiedCount,
@@ -149,8 +126,7 @@ export async function POST(req: NextRequest) {
         sendEvent(controller, { type: "complete", audit });
         controller.close();
       } catch (err: unknown) {
-        const message =
-          err instanceof Error ? err.message : "An unexpected error occurred.";
+        const message = err instanceof Error ? err.message : "An unexpected error occurred.";
         sendEvent(controller, { type: "error", message });
         controller.close();
       }

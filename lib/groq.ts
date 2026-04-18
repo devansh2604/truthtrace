@@ -1,5 +1,5 @@
 import Groq from "groq-sdk";
-import { RawClaim, Verdict } from "./types";
+import { RawClaim, Verdict, ScrapedSource } from "./types";
 
 export function createGroqClient(apiKey: string): Groq {
   return new Groq({ apiKey, dangerouslyAllowBrowser: false });
@@ -25,34 +25,24 @@ Return ONLY a valid JSON array (no markdown, no extra text). Each element must b
 Rules:
 - Each claim must be atomic (one fact per claim).
 - The span must be an exact substring of the original text.
-- Include ALL verifiable claims, including dates, names, numbers, attributions, and events.
+- Include ALL verifiable claims: dates, names, numbers, attributions, events.
 - Do NOT include opinions or subjective statements.`,
       },
-      {
-        role: "user",
-        content: text,
-      },
+      { role: "user", content: text },
     ],
     temperature: 0.1,
     max_tokens: 4096,
   });
 
   const content = completion.choices[0]?.message?.content || "[]";
-  // Strip markdown code fences if present
-  const cleaned = content.replace(/```json?\n?/g, "").replace(/```/g, "").trim();
-  
+  const cleaned = content.replace(/```json/gi, "").replace(/```/g, "").trim();
   try {
     const parsed = JSON.parse(cleaned);
     return Array.isArray(parsed) ? parsed : [];
   } catch {
-    // Try to extract JSON array from text
     const match = cleaned.match(/\[[\s\S]*\]/);
     if (match) {
-      try {
-        return JSON.parse(match[0]);
-      } catch {
-        return [];
-      }
+      try { return JSON.parse(match[0]); } catch { return []; }
     }
     return [];
   }
@@ -62,78 +52,85 @@ export async function verifyClaim(
   client: Groq,
   model: string,
   claim: string,
-  evidence: string
+  evidenceText: string,
+  totalSources: number
 ): Promise<{
   verdict: Verdict;
   confidence: number;
+  supportingCount: number;
+  contradictingCount: number;
   reasoning: string;
   supporting_quote: string;
+  sourceSentiments: Array<{ index: number; supports: "yes" | "no" | "neutral" }>;
 }> {
   const completion = await client.chat.completions.create({
     model,
     messages: [
       {
         role: "system",
-        content: `You are a rigorous fact-checker. Given a claim and evidence from Wikipedia and the web, determine if the claim is accurate.
+        content: `You are a rigorous fact-checker with access to ${totalSources} web sources.
 
-Return ONLY a raw JSON object — no markdown fences, no extra text, just the JSON:
+Analyze the claim against ALL provided sources. Return ONLY raw JSON (no markdown):
 {
   "verdict": "verified" | "unverified" | "hallucinated",
-  "confidence": <integer between 0 and 100>,
-  "reasoning": "<1-2 sentence explanation>",
-  "supporting_quote": "<short relevant quote from the evidence, or empty string if none>"
+  "supporting_count": <integer - how many sources support the claim>,
+  "contradicting_count": <integer - how many sources contradict or cast doubt>,
+  "reasoning": "<2-3 sentence summary of what the evidence shows>",
+  "supporting_quote": "<best quote from any source supporting or clarifying the claim>",
+  "source_sentiments": [
+    {"index": 1, "supports": "yes" | "no" | "neutral"},
+    ...one entry per source...
+  ]
 }
 
-Verdict definitions:
-- "verified": Evidence directly supports the claim. Confidence should reflect how strongly (e.g. 85-95 for clear matches, not always 100).
-- "unverified": Evidence is absent or inconclusive. Confidence should be 40-65.
-- "hallucinated": Claim contradicts evidence OR contains specific invented details (fake names, fake papers, fake institutions, wrong numbers). Confidence 70-95.
+Verdict rules:
+- "verified": Majority of sources (>50%) confirm the claim clearly.
+- "hallucinated": Claim directly contradicts evidence, OR contains invented names/papers/institutions not found in any source.
+- "unverified": Sources are inconclusive, mixed, or absent.
 
-IMPORTANT: Do NOT return 100 for everything. Be calibrated — very few things deserve 100%.`,
+supporting_count + contradicting_count should add up to the number of sources that took a clear position.
+Be precise with the counts. Do NOT inflate supporting_count.`,
       },
       {
         role: "user",
-        content: `CLAIM: ${claim}\n\nEVIDENCE:\n${evidence}`,
+        content: `CLAIM: ${claim}\n\nEVIDENCE FROM ${totalSources} SOURCES:\n${evidenceText}`,
       },
     ],
-    temperature: 0.2,
-    max_tokens: 512,
+    temperature: 0.1,
+    max_tokens: 1024,
   });
 
   const content = completion.choices[0]?.message?.content || "{}";
-  // Strip any markdown fences the model might add despite instructions
-  const cleaned = content
-    .replace(/```json/gi, "")
-    .replace(/```/g, "")
-    .trim();
+  const cleaned = content.replace(/```json/gi, "").replace(/```/g, "").trim();
 
   try {
-    const parsed = JSON.parse(cleaned);
-    // Handle confidence as either number or string (e.g. "85" or 85 or "85%")
-    const rawConf = parsed.confidence;
-    const confidence = Math.min(
-      100,
-      Math.max(
-        0,
-        typeof rawConf === "number"
-          ? Math.round(rawConf)
-          : parseInt(String(rawConf), 10) || 50
-      )
-    );
+    const p = JSON.parse(cleaned);
+    const supporting = Math.max(0, parseInt(p.supporting_count) || 0);
+    const contradicting = Math.max(0, parseInt(p.contradicting_count) || 0);
+    const total = Math.max(supporting + contradicting, 1);
+    // Confidence = % of opinionated sources that support
+    const confidence = Math.round((supporting / total) * 100);
+
     return {
-      verdict: ["verified", "unverified", "hallucinated"].includes(parsed.verdict)
-        ? (parsed.verdict as Verdict)
+      verdict: ["verified", "unverified", "hallucinated"].includes(p.verdict)
+        ? (p.verdict as Verdict)
         : "unverified",
       confidence,
-      reasoning: parsed.reasoning || "Unable to determine.",
-      supporting_quote: parsed.supporting_quote || "",
+      supportingCount: supporting,
+      contradictingCount: contradicting,
+      reasoning: p.reasoning || "Unable to determine.",
+      supporting_quote: p.supporting_quote || "",
+      sourceSentiments: Array.isArray(p.source_sentiments) ? p.source_sentiments : [],
     };
   } catch {
     return {
       verdict: "unverified",
       confidence: 50,
+      supportingCount: 0,
+      contradictingCount: 0,
       reasoning: "Could not parse verification response.",
       supporting_quote: "",
+      sourceSentiments: [],
     };
   }
 }

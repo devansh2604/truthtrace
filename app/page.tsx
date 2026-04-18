@@ -1,6 +1,6 @@
 "use client";
 import dynamic from "next/dynamic";
-import { useState, useRef } from "react";
+import { useState, useRef, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Download, FileJson, AlertTriangle } from "lucide-react";
 import { Hero } from "@/components/hero";
@@ -11,9 +11,8 @@ import { AnnotatedDoc } from "@/components/results/annotated-doc";
 import { ClaimCards } from "@/components/results/claim-cards";
 import { SAMPLE_TEXT, GROQ_MODELS } from "@/lib/constants";
 import { generateMarkdownReport, generateJSONPayload, downloadFile } from "@/lib/export";
-import type { AuditResult, ClaimResult, StreamEvent } from "@/lib/types";
+import type { AuditResult, ClaimResult, StreamEvent, Verdict } from "@/lib/types";
 
-// Recharts components must be loaded client-side only (no SSR)
 const TrustScoreRing = dynamic(
   () => import("@/components/results/trust-score-ring").then((m) => m.TrustScoreRing),
   { ssr: false }
@@ -23,10 +22,20 @@ const VerdictBar = dynamic(
   { ssr: false }
 );
 
-interface Progress {
-  phase: string;
-  current: number;
-  total: number;
+interface Progress { phase: string; current: number; total: number; }
+
+function computeAuditStats(claims: ClaimResult[]) {
+  const effective = claims.map((c) => ({ ...c, verdict: (c.userVerdict ?? c.verdict) as Verdict }));
+  const verifiedCount = effective.filter((r) => r.verdict === "verified").length;
+  const hallucinatedCount = effective.filter((r) => r.verdict === "hallucinated").length;
+  const unverifiedCount = effective.filter((r) => r.verdict === "unverified").length;
+  const verifiedAvgConf = verifiedCount > 0
+    ? effective.filter((r) => r.verdict === "verified").reduce((s, r) => s + r.confidence, 0) / verifiedCount
+    : 0;
+  const trustScore = Math.min(100, Math.max(0, Math.round(
+    claims.length > 0 ? (verifiedCount / claims.length) * verifiedAvgConf : 0
+  )));
+  return { verifiedCount, hallucinatedCount, unverifiedCount, trustScore };
 }
 
 export default function Home() {
@@ -49,7 +58,6 @@ export default function Home() {
     setAuditResult(null);
     setStreamingClaims([]);
     setProgress({ phase: "Connecting…", current: 0, total: 0 });
-
     abortRef.current = new AbortController();
 
     try {
@@ -59,12 +67,10 @@ export default function Home() {
         body: JSON.stringify({ text, apiKey, model }),
         signal: abortRef.current.signal,
       });
-
       if (!res.ok) {
         const errData = await res.json().catch(() => ({ error: "Unknown error" }));
         throw new Error(errData.error || `HTTP ${res.status}`);
       }
-
       const reader = res.body?.getReader();
       if (!reader) throw new Error("No response body");
       const decoder = new TextDecoder();
@@ -73,25 +79,20 @@ export default function Home() {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split("\n");
         buffer = lines.pop() ?? "";
-
         for (const line of lines) {
           if (!line.startsWith("data: ")) continue;
           const raw = line.slice(6).trim();
           if (!raw) continue;
-
           try {
             const event: StreamEvent = JSON.parse(raw);
-
             if (event.type === "claim_start") {
               setProgress({
-                phase:
-                  event.total > 0
-                    ? `Verifying claim ${event.claimIndex + 1}/${event.total}`
-                    : "Extracting claims…",
+                phase: event.total > 0
+                  ? `Scraping sources for claim ${event.claimIndex + 1}/${event.total}`
+                  : "Extracting claims…",
                 current: event.claimIndex,
                 total: event.total,
               });
@@ -103,29 +104,41 @@ export default function Home() {
             } else if (event.type === "error") {
               throw new Error(event.message);
             }
-          } catch {
-            // ignore malformed SSE lines
-          }
+          } catch { /* ignore malformed SSE lines */ }
         }
       }
     } catch (err: unknown) {
       if (err instanceof Error && err.name === "AbortError") return;
-      setError(
-        err instanceof Error ? err.message : "An unexpected error occurred."
-      );
+      setError(err instanceof Error ? err.message : "An unexpected error occurred.");
     } finally {
       setLoading(false);
       setProgress(null);
     }
   };
 
-  const displayClaims = auditResult?.claims ?? streamingClaims;
+  const handleVerdictOverride = useCallback((claimId: string, verdict: Verdict) => {
+    setAuditResult((prev) => {
+      if (!prev) return prev;
+      const updatedClaims = prev.claims.map((c) =>
+        c.id === claimId ? { ...c, userVerdict: verdict } : c
+      );
+      const stats = computeAuditStats(updatedClaims);
+      return {
+        ...prev,
+        claims: updatedClaims,
+        trustScore: stats.trustScore,
+        verifiedCount: stats.verifiedCount,
+        unverifiedCount: stats.unverifiedCount,
+        hallucinatedCount: stats.hallucinatedCount,
+      };
+    });
+  }, []);
+
   const isStreaming = loading && streamingClaims.length > 0;
 
   return (
     <main>
       <Hero />
-
       <div className="main-container">
         <ConfigCard
           apiKey={apiKey}
@@ -135,11 +148,8 @@ export default function Home() {
           onLoadSample={() => setText(SAMPLE_TEXT)}
         />
 
-        {/* Document textarea */}
         <div className="doc-textarea-wrapper">
-          <label htmlFor="doc-input" className="doc-label">
-            Document to Audit
-          </label>
+          <label htmlFor="doc-input" className="doc-label">Document to Audit</label>
           <textarea
             id="doc-input"
             className="doc-textarea"
@@ -150,40 +160,23 @@ export default function Home() {
           />
         </div>
 
-        <AuditButton
-          onClick={handleAudit}
-          loading={loading}
-          disabled={!canAudit}
-          progress={progress}
-        />
+        <AuditButton onClick={handleAudit} loading={loading} disabled={!canAudit} progress={progress} />
 
-        {/* Error */}
         {error && (
-          <motion.div
-            className="error-banner"
-            initial={{ opacity: 0, y: -8 }}
-            animate={{ opacity: 1, y: 0 }}
-          >
+          <motion.div className="error-banner" initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }}>
             <AlertTriangle size={16} style={{ flexShrink: 0, marginTop: 1 }} />
             <span>{error}</span>
           </motion.div>
         )}
 
-        {/* Streaming live preview cards */}
         <AnimatePresence>
           {isStreaming && streamingClaims.length > 0 && (
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0 }}
-              style={{ marginTop: 24 }}
-            >
+            <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} style={{ marginTop: 24 }}>
               <ClaimCards claims={streamingClaims} streaming={true} />
             </motion.div>
           )}
         </AnimatePresence>
 
-        {/* Full results after complete */}
         <AnimatePresence>
           {auditResult && (
             <motion.div
@@ -193,7 +186,6 @@ export default function Home() {
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.6 }}
             >
-              {/* Trust Score + Verdict Bar */}
               <div className="results-top-row">
                 <TrustScoreRing score={auditResult.trustScore} />
                 <VerdictBar
@@ -203,7 +195,6 @@ export default function Home() {
                 />
               </div>
 
-              {/* Metric Cards */}
               <MetricCards
                 total={auditResult.totalClaims}
                 verified={auditResult.verifiedCount}
@@ -211,42 +202,23 @@ export default function Home() {
                 hallucinated={auditResult.hallucinatedCount}
               />
 
-              {/* Annotated Document */}
               <AnnotatedDoc text={text} claims={auditResult.claims} />
 
-              {/* Export buttons */}
               <div className="export-row">
-                <button
-                  className="export-btn"
-                  onClick={() =>
-                    downloadFile(
-                      generateMarkdownReport(text, auditResult),
-                      `truthtrace-audit-${Date.now()}.md`,
-                      "text/markdown"
-                    )
-                  }
-                >
-                  <Download size={15} />
-                  Download Markdown
+                <button className="export-btn" onClick={() => downloadFile(generateMarkdownReport(text, auditResult), `truthtrace-audit-${Date.now()}.md`, "text/markdown")}>
+                  <Download size={15} /> Download Markdown
                 </button>
-                <button
-                  className="export-btn"
-                  onClick={() =>
-                    downloadFile(
-                      generateJSONPayload(text, auditResult),
-                      `truthtrace-audit-${Date.now()}.json`,
-                      "application/json"
-                    )
-                  }
-                >
-                  <FileJson size={15} />
-                  Download JSON
+                <button className="export-btn" onClick={() => downloadFile(generateJSONPayload(text, auditResult), `truthtrace-audit-${Date.now()}.json`, "application/json")}>
+                  <FileJson size={15} /> Download JSON
                 </button>
               </div>
 
-              {/* Claim cards list */}
               <div style={{ marginTop: 24 }}>
-                <ClaimCards claims={auditResult.claims} streaming={false} />
+                <ClaimCards
+                  claims={auditResult.claims}
+                  streaming={false}
+                  onVerdictOverride={handleVerdictOverride}
+                />
               </div>
             </motion.div>
           )}
