@@ -120,19 +120,26 @@ export async function POST(req: NextRequest) {
           (r) => r.verdict === "unverified"
         ).length;
 
-        // Trust score: weighted average of confidences
-        // verified=full confidence, unverified=partial, hallucinated=0
-        const trustScore = Math.round(
-          results.reduce((acc, r) => {
-            if (r.verdict === "verified") return acc + r.confidence;
-            if (r.verdict === "unverified") return acc + r.confidence * 0.4;
-            return acc; // hallucinated = 0
-          }, 0) / Math.max(results.length, 1)
-        );
+        // Trust score: % of claims verified * avg confidence of verified claims
+        // Penalises hallucinations heavily, rewards verified claims
+        const verifiedAvgConf =
+          verifiedCount > 0
+            ? results
+                .filter((r) => r.verdict === "verified")
+                .reduce((s, r) => s + r.confidence, 0) / verifiedCount
+            : 0;
+
+        // Score = (verified/total) * verifiedAvgConf
+        // e.g. 4 verified of 12 claims, avg 88% conf → (4/12)*88 = 29
+        // All verified at 90% → 90. All hallucinated → 0.
+        const rawScore =
+          results.length > 0
+            ? (verifiedCount / results.length) * verifiedAvgConf
+            : 0;
 
         const audit: AuditResult = {
           claims: results,
-          trustScore: Math.min(100, Math.max(0, trustScore)),
+          trustScore: Math.min(100, Math.max(0, Math.round(rawScore))),
           totalClaims: results.length,
           verifiedCount,
           unverifiedCount,

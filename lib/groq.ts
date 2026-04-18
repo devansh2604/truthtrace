@@ -76,40 +76,55 @@ export async function verifyClaim(
         role: "system",
         content: `You are a rigorous fact-checker. Given a claim and evidence from Wikipedia and the web, determine if the claim is accurate.
 
-Return ONLY a valid JSON object (no markdown):
+Return ONLY a raw JSON object — no markdown fences, no extra text, just the JSON:
 {
-  "verdict": "<verified|unverified|hallucinated>",
-  "confidence": <integer 0-100>,
+  "verdict": "verified" | "unverified" | "hallucinated",
+  "confidence": <integer between 0 and 100>,
   "reasoning": "<1-2 sentence explanation>",
-  "supporting_quote": "<relevant quote from the evidence, or empty string>"
+  "supporting_quote": "<short relevant quote from the evidence, or empty string if none>"
 }
 
-Definitions:
-- verified: The claim is confirmed by the evidence with high confidence.
-- unverified: The evidence neither confirms nor contradicts the claim (insufficient info).
-- hallucinated: The claim directly contradicts the evidence, or makes specific attributions (names, papers, institutions) that cannot be verified and appear fabricated.
+Verdict definitions:
+- "verified": Evidence directly supports the claim. Confidence should reflect how strongly (e.g. 85-95 for clear matches, not always 100).
+- "unverified": Evidence is absent or inconclusive. Confidence should be 40-65.
+- "hallucinated": Claim contradicts evidence OR contains specific invented details (fake names, fake papers, fake institutions, wrong numbers). Confidence 70-95.
 
-Be strict: invented academic papers, fake researchers, wrong statistics = hallucinated.`,
+IMPORTANT: Do NOT return 100 for everything. Be calibrated — very few things deserve 100%.`,
       },
       {
         role: "user",
         content: `CLAIM: ${claim}\n\nEVIDENCE:\n${evidence}`,
       },
     ],
-    temperature: 0.1,
+    temperature: 0.2,
     max_tokens: 512,
   });
 
   const content = completion.choices[0]?.message?.content || "{}";
-  const cleaned = content.replace(/```json?\n?/g, "").replace(/```/g, "").trim();
+  // Strip any markdown fences the model might add despite instructions
+  const cleaned = content
+    .replace(/```json/gi, "")
+    .replace(/```/g, "")
+    .trim();
 
   try {
     const parsed = JSON.parse(cleaned);
+    // Handle confidence as either number or string (e.g. "85" or 85 or "85%")
+    const rawConf = parsed.confidence;
+    const confidence = Math.min(
+      100,
+      Math.max(
+        0,
+        typeof rawConf === "number"
+          ? Math.round(rawConf)
+          : parseInt(String(rawConf), 10) || 50
+      )
+    );
     return {
       verdict: ["verified", "unverified", "hallucinated"].includes(parsed.verdict)
-        ? parsed.verdict
+        ? (parsed.verdict as Verdict)
         : "unverified",
-      confidence: Math.min(100, Math.max(0, parseInt(parsed.confidence) || 50)),
+      confidence,
       reasoning: parsed.reasoning || "Unable to determine.",
       supporting_quote: parsed.supporting_quote || "",
     };
