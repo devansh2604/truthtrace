@@ -1,178 +1,206 @@
-import { parse } from "node-html-parser";
 import { ScrapedSource } from "./types";
 
 const UA = "Mozilla/5.0 (compatible; TruthTrace/1.0; +https://truthtrace.vercel.app)";
 
-// ── DuckDuckGo HTML search → scrape result snippets ──────────────────────────
-async function scrapeDDGSearch(query: string): Promise<ScrapedSource[]> {
+// ── Wikipedia REST API ────────────────────────────────────────────────────────
+async function scrapeWikipedia(query: string): Promise<ScrapedSource[]> {
   const sources: ScrapedSource[] = [];
   try {
-    const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}&kl=us-en`;
+    // Try direct page summary first
+    const encoded = encodeURIComponent(query.split(/\s+/).slice(0, 6).join(" "));
+    const res = await fetch(
+      `https://en.wikipedia.org/api/rest_v1/page/summary/${encoded}`,
+      { headers: { "User-Agent": UA }, signal: AbortSignal.timeout(6000) }
+    );
+    if (res.ok) {
+      const data = await res.json();
+      if (data.extract) {
+        sources.push({
+          title: data.title,
+          url: data.content_urls?.desktop?.page || `https://en.wikipedia.org/wiki/${encoded}`,
+          domain: "en.wikipedia.org",
+          snippet: data.extract.slice(0, 600),
+          source: "wikipedia",
+          supports: "neutral",
+        });
+      }
+    }
+
+    // Also search Wikipedia for up to 3 related pages
+    const searchRes = await fetch(
+      `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encoded}&format=json&origin=*&srlimit=3`,
+      { headers: { "User-Agent": UA }, signal: AbortSignal.timeout(6000) }
+    );
+    if (searchRes.ok) {
+      const searchData = await searchRes.json();
+      const results = searchData?.query?.search || [];
+      for (const r of results.slice(0, 3)) {
+        if (sources.some((s) => s.title === r.title)) continue;
+        // Strip HTML from snippet
+        const snippet = (r.snippet || "").replace(/<[^>]+>/g, "").slice(0, 400);
+        sources.push({
+          title: r.title,
+          url: `https://en.wikipedia.org/wiki/${encodeURIComponent(r.title)}`,
+          domain: "en.wikipedia.org",
+          snippet,
+          source: "wikipedia",
+          supports: "neutral",
+        });
+      }
+    }
+  } catch { /* silent fail */ }
+  return sources;
+}
+
+// ── DuckDuckGo Instant Answer JSON API (free, no key) ────────────────────────
+async function scrapeDDGInstant(query: string): Promise<ScrapedSource[]> {
+  const sources: ScrapedSource[] = [];
+  try {
+    const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`;
     const res = await fetch(url, {
       headers: { "User-Agent": UA },
       signal: AbortSignal.timeout(8000),
     });
     if (!res.ok) return sources;
+    const data = await res.json();
 
-    const html = await res.text();
-    const root = parse(html);
-
-    const results = root.querySelectorAll(".result");
-    for (const result of results.slice(0, 12)) {
-      const titleEl = result.querySelector(".result__title a");
-      const snippetEl = result.querySelector(".result__snippet");
-      const urlEl = result.querySelector(".result__url");
-
-      const title = titleEl?.text?.trim() || "";
-      const snippet = snippetEl?.text?.trim() || "";
-      const rawUrl = titleEl?.getAttribute("href") || urlEl?.text?.trim() || "";
-
-      if (!snippet || !title) continue;
-
-      // Extract real URL from DDG redirect
-      let domain = "";
-      try {
-        const urlStr = rawUrl.includes("uddg=")
-          ? decodeURIComponent(rawUrl.split("uddg=")[1].split("&")[0])
-          : rawUrl;
-        domain = new URL(urlStr.startsWith("http") ? urlStr : `https://${urlStr}`).hostname.replace("www.", "");
-      } catch {
-        domain = rawUrl.slice(0, 30);
-      }
-
+    // Abstract (main answer)
+    if (data.Abstract) {
       sources.push({
-        title: title.slice(0, 100),
-        url: rawUrl,
-        domain,
-        snippet: snippet.slice(0, 400),
+        title: data.Heading || query,
+        url: data.AbstractURL || data.AbstractSource || "",
+        domain: data.AbstractSource || "duckduckgo.com",
+        snippet: data.Abstract.slice(0, 500),
         source: "web",
         supports: "neutral",
       });
     }
-  } catch {
-    // silently fail
-  }
+
+    // Related topics
+    const topics: Array<{ Text?: string; FirstURL?: string }> = data.RelatedTopics || [];
+    for (const topic of topics.slice(0, 8)) {
+      if (!topic.Text) continue;
+      let domain = "duckduckgo.com";
+      try { domain = new URL(topic.FirstURL || "").hostname.replace("www.", ""); } catch { /**/ }
+      sources.push({
+        title: topic.Text.slice(0, 80),
+        url: topic.FirstURL || "",
+        domain,
+        snippet: topic.Text.slice(0, 400),
+        source: "web",
+        supports: "neutral",
+      });
+    }
+
+    // Infobox facts
+    const infobox: Array<{ label?: string; value?: string }> = data.Infobox?.content || [];
+    if (infobox.length > 0) {
+      const facts = infobox
+        .filter((f) => f.label && f.value)
+        .map((f) => `${f.label}: ${f.value}`)
+        .join(" | ")
+        .slice(0, 400);
+      if (facts) {
+        sources.push({
+          title: `${data.Heading || query} — Infobox`,
+          url: data.AbstractURL || "",
+          domain: "duckduckgo.com",
+          snippet: facts,
+          source: "web",
+          supports: "neutral",
+        });
+      }
+    }
+  } catch { /* silent fail */ }
   return sources;
 }
 
-// ── Wikipedia REST API ────────────────────────────────────────────────────────
-async function scrapeWikipedia(query: string): Promise<ScrapedSource | null> {
+// ── DuckDuckGo search results via their open API ──────────────────────────────
+async function scrapeDDGSearch(query: string): Promise<ScrapedSource[]> {
+  const sources: ScrapedSource[] = [];
   try {
-    const encoded = encodeURIComponent(
-      query.split(/\s+/).slice(0, 6).join(" ")
-    );
-    const res = await fetch(
-      `https://en.wikipedia.org/api/rest_v1/page/summary/${encoded}`,
-      {
-        headers: { "User-Agent": UA },
-        signal: AbortSignal.timeout(6000),
-      }
-    );
-    if (!res.ok) {
-      // try search fallback
-      const searchRes = await fetch(
-        `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encoded}&format=json&origin=*&srlimit=1`,
-        { headers: { "User-Agent": UA }, signal: AbortSignal.timeout(5000) }
-      );
-      if (!searchRes.ok) return null;
-      const searchData = await searchRes.json();
-      const first = searchData?.query?.search?.[0];
-      if (!first) return null;
-      const title = encodeURIComponent(first.title);
-      const s2 = await fetch(
-        `https://en.wikipedia.org/api/rest_v1/page/summary/${title}`,
-        { headers: { "User-Agent": UA }, signal: AbortSignal.timeout(5000) }
-      );
-      if (!s2.ok) return null;
-      const d2 = await s2.json();
-      if (!d2.extract) return null;
-      return {
-        title: d2.title,
-        url: d2.content_urls?.desktop?.page || `https://en.wikipedia.org/wiki/${title}`,
-        domain: "en.wikipedia.org",
-        snippet: d2.extract.slice(0, 600),
-        source: "wikipedia",
-        supports: "neutral",
-      };
-    }
+    // DDG search suggestions give us related queries we can mine
+    const url = `https://ac.duckduckgo.com/ac/?q=${encodeURIComponent(query)}&type=list`;
+    const res = await fetch(url, {
+      headers: { "User-Agent": UA },
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) return sources;
     const data = await res.json();
-    if (!data.extract) return null;
-    return {
-      title: data.title,
-      url: data.content_urls?.desktop?.page || `https://en.wikipedia.org/wiki/${encoded}`,
-      domain: "en.wikipedia.org",
-      snippet: data.extract.slice(0, 600),
-      source: "wikipedia",
-      supports: "neutral",
-    };
-  } catch {
-    return null;
-  }
+    // Returns [query, [suggestions]]
+    const suggestions: string[] = Array.isArray(data) && Array.isArray(data[1]) ? data[1] : [];
+
+    // For each related suggestion, hit DDG instant answer again
+    const subResults = await Promise.all(
+      suggestions.slice(0, 4).map((s) => scrapeDDGInstant(s))
+    );
+    for (const sub of subResults) sources.push(...sub.slice(0, 2));
+  } catch { /* silent fail */ }
+  return sources;
 }
 
-// ── Fetch & extract text from a real webpage ──────────────────────────────────
+// ── Fetch real webpage text ───────────────────────────────────────────────────
 async function fetchPageText(url: string): Promise<string> {
+  if (!url || !url.startsWith("http")) return "";
   try {
-    // Only fetch plain web pages, skip PDFs, videos etc.
-    if (!url.startsWith("http")) return "";
     const res = await fetch(url, {
-      headers: { "User-Agent": UA, Accept: "text/html" },
-      signal: AbortSignal.timeout(5000),
+      headers: { "User-Agent": UA, Accept: "text/html,application/xhtml+xml" },
+      signal: AbortSignal.timeout(6000),
     });
     if (!res.ok) return "";
     const ct = res.headers.get("content-type") || "";
     if (!ct.includes("html")) return "";
     const html = await res.text();
-    const root = parse(html);
-    // Remove scripts, styles, nav etc.
-    root.querySelectorAll("script,style,nav,footer,header,aside").forEach((el) => el.remove());
-    const text = root.querySelector("main, article, .content, body")?.text || root.text;
-    return text.replace(/\s+/g, " ").trim().slice(0, 800);
+    // Simple text extraction — remove tags
+    const text = html
+      .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
+      .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    return text.slice(0, 800);
   } catch {
     return "";
   }
 }
 
-// ── Main gather function ──────────────────────────────────────────────────────
+// ── Main export ───────────────────────────────────────────────────────────────
 export async function gatherEvidence(claim: string): Promise<{
   sources: ScrapedSource[];
   evidenceText: string;
   totalSources: number;
 }> {
-  // Run Wikipedia + DDG search in parallel
-  const [wikiResult, ddgSources] = await Promise.all([
+  // Run Wikipedia + DDG instant + DDG search in parallel
+  const [wikiSources, ddgInstant, ddgSearch] = await Promise.all([
     scrapeWikipedia(claim),
+    scrapeDDGInstant(claim),
     scrapeDDGSearch(claim),
   ]);
 
-  const sources: ScrapedSource[] = [];
-  if (wikiResult) sources.push(wikiResult);
-  sources.push(...ddgSources);
-
-  // Fetch actual page text for top 5 web sources to enrich snippets
-  const webSources = sources.filter((s) => s.source === "web").slice(0, 5);
-  const pageTexts = await Promise.all(
-    webSources.map((s) => fetchPageText(s.url))
-  );
-  pageTexts.forEach((text, i) => {
-    if (text && text.length > 100) {
-      webSources[i].snippet = text.slice(0, 400);
+  // Deduplicate by snippet content
+  const seen = new Set<string>();
+  const all: ScrapedSource[] = [];
+  for (const src of [...wikiSources, ...ddgInstant, ...ddgSearch]) {
+    const key = src.snippet.slice(0, 60);
+    if (!seen.has(key) && src.snippet.length > 20) {
+      seen.add(key);
+      all.push(src);
     }
+  }
+
+  // Fetch real page text for top non-Wikipedia web sources to enrich snippets
+  const webSources = all.filter((s) => s.source === "web" && s.url.startsWith("http")).slice(0, 5);
+  const pageTexts = await Promise.all(webSources.map((s) => fetchPageText(s.url)));
+  pageTexts.forEach((text, i) => {
+    if (text && text.length > 100) webSources[i].snippet = text.slice(0, 400);
   });
 
-  // Build evidence text for LLM
-  const evidenceParts = sources.slice(0, 15).map((s, i) =>
-    `[Source ${i + 1}: ${s.domain}]\nTitle: ${s.title}\n${s.snippet}`
-  );
+  const final = all.slice(0, 15);
 
   const evidenceText =
-    evidenceParts.length > 0
-      ? evidenceParts.join("\n\n---\n\n")
+    final.length > 0
+      ? final.map((s, i) => `[Source ${i + 1}: ${s.domain}]\nTitle: ${s.title}\n${s.snippet}`).join("\n\n---\n\n")
       : "No evidence found for this claim.";
 
-  return {
-    sources: sources.slice(0, 15),
-    evidenceText,
-    totalSources: sources.length,
-  };
+  return { sources: final, evidenceText, totalSources: final.length };
 }
