@@ -1,36 +1,96 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# TruthTrace — AI Hallucination Auditor
 
-## Getting Started
+> **Every claim. Every source. Every time.**
 
-First, run the development server:
+TruthTrace extracts every factual claim from AI-generated text, verifies each one against Wikipedia and live web sources using Groq LLMs, and returns a color-coded audit with a 0–100 trust score — streamed live as results arrive.
+
+![TruthTrace Screenshot](./public/screenshot.png)
+
+## ✨ Features
+
+- **Live SSE Streaming** — results appear one-by-one as each claim is verified
+- **Claim Extraction** — Llama 3.3 70B identifies every atomic, verifiable fact
+- **Evidence Gathering** — Wikipedia REST API + DuckDuckGo per claim
+- **LLM-as-Judge** — second Groq call delivers `verified` / `unverified` / `hallucinated` verdict + confidence %
+- **Trust Score Ring** — 0–100 Recharts radial gauge, color-shifts red → amber → green
+- **Annotated Document** — inline highlights with hover tooltips showing reasoning
+- **Filter Tabs** — filter claims by verdict
+- **Export** — Download Markdown report or full JSON payload
+
+## 🚀 Quick Start
+
+### 1. Get a free Groq API key
+
+Sign up at [console.groq.com](https://console.groq.com) — no credit card needed.
+
+### 2. Clone & install
+
+```bash
+git clone <repo-url>
+cd truthtrace
+npm install
+```
+
+### 3. Run locally
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000), paste your Groq key, and click **Run Audit**.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+> Your API key is **never stored** — it's sent directly to your own Groq account per request only.
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## 🏗️ Stack
 
-## Learn More
+| Layer | Tech |
+|-------|------|
+| Framework | Next.js 14 App Router + TypeScript |
+| Styling | Tailwind CSS v4 + custom CSS design system |
+| Animation | Framer Motion |
+| Icons | Lucide React |
+| Charts | Recharts |
+| LLM | Groq SDK (Llama 3.3 70B) |
+| Evidence | Wikipedia REST API + DuckDuckGo Instant Answer API |
+| Deploy | Vercel (free hobby tier) |
 
-To learn more about Next.js, take a look at the following resources:
+## 📁 File Structure
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```
+truthtrace/
+├── app/
+│   ├── layout.tsx          # Root layout + fonts
+│   ├── page.tsx            # Main single-page experience
+│   ├── globals.css         # Full design system (tokens, keyframes, components)
+│   └── api/audit/route.ts  # POST → SSE streaming pipeline
+├── components/
+│   ├── hero.tsx
+│   ├── config-card.tsx
+│   ├── audit-button.tsx
+│   └── results/
+│       ├── trust-score-ring.tsx
+│       ├── metric-cards.tsx
+│       ├── verdict-bar.tsx
+│       ├── annotated-doc.tsx
+│       └── claim-cards.tsx
+├── lib/
+│   ├── types.ts
+│   ├── groq.ts
+│   ├── evidence.ts
+│   ├── export.ts
+│   └── constants.ts
+└── hooks/
+    └── use-counter.ts
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## 🌐 Deploy to Vercel
 
-## Deploy on Vercel
+```bash
+npx vercel --prod
+```
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+No environment variables needed — API key is provided by user at runtime via the UI.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## 📄 License
+
+MIT
