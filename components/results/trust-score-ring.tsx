@@ -10,6 +10,8 @@ import { useCounter } from "@/hooks/use-counter";
 
 interface TrustScoreRingProps {
   score: number;
+  pendingCount?: number;
+  decidedCount?: number;
 }
 
 function getScoreColor(score: number): string {
@@ -18,16 +20,18 @@ function getScoreColor(score: number): string {
   return "#ef4444";
 }
 
-function getLabel(score: number): string {
+function getLabel(score: number, decided: number): string {
+  if (decided === 0) return "Awaiting decisions";
   if (score >= 75) return "Highly Reliable";
   if (score >= 55) return "Partially Reliable";
   if (score >= 35) return "Questionable";
   return "Unreliable";
 }
 
-export function TrustScoreRing({ score }: TrustScoreRingProps) {
+export function TrustScoreRing({ score, pendingCount = 0, decidedCount = 0 }: TrustScoreRingProps) {
   const displayScore = useCounter(score, 1200, true);
-  const color = getScoreColor(score);
+  const isPending = decidedCount === 0;
+  const color = isPending ? "#64748b" : getScoreColor(score);
 
   const data = [
     { name: "Trust", value: score, fill: color },
@@ -70,13 +74,20 @@ export function TrustScoreRing({ score }: TrustScoreRingProps) {
           </RadialBarChart>
         </ResponsiveContainer>
         <div className="trust-score-center">
-          <span className="trust-number" style={{ color }}>
-            {displayScore}
-          </span>
-          <span className="trust-slash">/100</span>
+          {isPending ? (
+            <span className="trust-number" style={{ color, fontSize: "2rem", lineHeight: 1 }}>—</span>
+          ) : (
+            <span className="trust-number" style={{ color }}>{displayScore}</span>
+          )}
+          {!isPending && <span className="trust-slash">/100</span>}
           <span className="trust-verdict" style={{ color }}>
-            {getLabel(score)}
+            {getLabel(score, decidedCount)}
           </span>
+          {isPending && pendingCount > 0 && (
+            <span style={{ fontSize: "0.72rem", color: "#94a3b8", marginTop: 4, textAlign: "center", lineHeight: 1.4 }}>
+              Label claims below
+            </span>
+          )}
         </div>
       </div>
     </motion.div>

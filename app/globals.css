@@ -757,3 +757,17 @@ body {
   color: #f59e0b;
   margin-left: 10px;
 }
+/* ── Pending guide banner ── */
+.pending-guide-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 18px;
+  background: rgba(102, 126, 234, 0.1);
+  border: 1px solid rgba(102, 126, 234, 0.3);
+  border-radius: 12px;
+  font-size: 0.9rem;
+  color: rgba(255, 255, 255, 0.85);
+  line-height: 1.5;
+  margin-bottom: 4px;
+}

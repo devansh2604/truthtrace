@@ -190,13 +190,35 @@ export default function Home() {
               transition={{ duration: 0.6 }}
             >
               <div className="results-top-row">
-                <TrustScoreRing score={auditResult.trustScore} />
+                <TrustScoreRing
+                  score={auditResult.trustScore}
+                  pendingCount={auditResult.pendingCount}
+                  decidedCount={auditResult.decidedCount}
+                />
                 <VerdictBar
                   verified={auditResult.verifiedCount}
                   unverified={auditResult.unverifiedCount}
                   hallucinated={auditResult.hallucinatedCount}
                 />
               </div>
+
+              {/* Guide banner — shown until user makes first decision */}
+              {auditResult.decidedCount === 0 && (
+                <motion.div
+                  className="pending-guide-banner"
+                  initial={{ opacity: 0, y: -8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                >
+                  <span style={{ fontSize: "1.1rem" }}>👇</span>
+                  <span>
+                    Audit complete! <strong>{auditResult.totalClaims} claims found.</strong>
+                    {" "}Scroll down, review the evidence for each claim, then click
+                    {" "}<strong style={{ color: "#10b981" }}>Verified</strong>,
+                    {" "}<strong style={{ color: "#f59e0b" }}>Unverified</strong>, or
+                    {" "}<strong style={{ color: "#ef4444" }}>Hallucinated</strong> to build your Trust Score.
+                  </span>
+                </motion.div>
+              )}
 
               <MetricCards
                 total={auditResult.totalClaims}
